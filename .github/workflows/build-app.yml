@@ -118,7 +118,10 @@ jobs:
             -DLLVM_INCLUDE_TESTS=Off -DLLVM_INCLUDE_EXAMPLES=Off -DLLVM_INCLUDE_BENCHMARKS=Off -DLLVM_INCLUDE_UTILS=Off \
             -DLLVM_ENABLE_TERMINFO=Off -DLLVM_ENABLE_LIBXML2=Off -DLLVM_ENABLE_ZSTD=Off -DLLVM_ENABLE_ZLIB=Off \
             > llvm-ios-cfg.log 2>&1 || { tail -60 llvm-ios-cfg.log; exit 1; }
-          cmake --build toolchains/llvm-ios-build > llvm-ios-build.log 2>&1 || { grep -m30 -B2 -A8 'error' llvm-ios-build.log; exit 1; }
+          # Only the static libraries (libLTO.dylib & co. do not link for iOS: ld has no -z defs).
+          LIBS=$(ninja -C toolchains/llvm-ios-build -t targets all | grep -oE '^lib/libLLVM[A-Za-z0-9]+\.a' | sort -u)
+          echo "$(echo "$LIBS" | wc -l) static libs"
+          ninja -C toolchains/llvm-ios-build $LIBS > llvm-ios-build.log 2>&1 || { grep -m30 -B2 -A8 'error' llvm-ios-build.log; exit 1; }
           ls toolchains/llvm-ios-build/lib/*.a | wc -l
       - name: Save LLVM 15.0.7 iOS
         if: steps.llvm.outputs.cache-hit != 'true' && hashFiles('toolchains/llvm-ios-build/lib/libLLVMCore.a') != ''
