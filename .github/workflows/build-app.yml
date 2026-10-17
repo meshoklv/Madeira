@@ -280,6 +280,7 @@ jobs:
       - name: Build ntdll-unix
         shell: bash
         run: |
+          set +e
           bash build/ntdll-unix/build.sh 2>&1 | tee ntdll.log
           rc=${PIPESTATUS[0]}
           for f in build/ntdll-unix/obj/*.err; do grep -q 'error:' "$f" && { echo "== $f"; grep -m8 -A4 'error:' "$f"; }; done
@@ -317,6 +318,7 @@ jobs:
       - name: Build win32u-unix
         shell: bash
         run: |
+          set +e
           bash build/win32u-unix/build.sh 2>&1 | tee win32u.log; rc=${PIPESTATUS[0]}
           for f in build/win32u-unix/obj/*.err; do [ -f "$f" ] && grep -q 'error:' "$f" && { echo "== $f"; grep -m8 -A4 'error:' "$f"; }; done
           grep -i 'merged libfreetype' win32u.log || echo "::warning::freetype not merged"
@@ -432,4 +434,6 @@ jobs:
           path: |
             *.log
             exports.txt
+            build/*/obj/*.err
+            build/*/obj/*/*.err
           retention-days: 7
