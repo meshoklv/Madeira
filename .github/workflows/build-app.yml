@@ -225,7 +225,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: wine/build-native
-          key: wine-native-${{ env.WINE_SHA }}-v1
+          key: wine-native-${{ env.WINE_SHA }}-v2
       - name: Build native Wine tools
         if: steps.winenative.outputs.cache-hit != 'true'
         shell: bash
@@ -234,16 +234,16 @@ jobs:
           mkdir -p wine/build-native && cd wine/build-native
           ../configure --without-x --disable-tests > ../../wine-native-configure.log 2>&1 || { tail -40 ../../wine-native-configure.log; exit 1; }
           N=$(sysctl -n hw.ncpu)
-          TOOLS=$(grep -oE '^tools/[a-z0-9_]+/all:' Makefile | tr -d ':' | sort -u | tr '\n' ' ')
+          TOOLS=$(grep -oE '^tools/([a-z0-9_]+/all|[a-z0-9_]+):' Makefile | tr -d ':' | sort -u | tr '\n' ' ')
           echo "tool targets: $TOOLS"
           { make -j"$N" $TOOLS && make -j"$N" include/all; } > ../../wine-native-make.log 2>&1 || { grep -m30 -A5 -E 'error|\*\*\*' ../../wine-native-make.log || true; tail -30 ../../wine-native-make.log; exit 1; }
-          ls -la tools/widl/widl tools/wrc/wrc tools/winebuild/winebuild
+          ls -la tools/widl/widl tools/wrc/wrc tools/winebuild/winebuild tools/make_xftmpl
       - name: Save native Wine tools
-        if: steps.winenative.outputs.cache-hit != 'true' && hashFiles('wine/build-native/tools/widl/widl') != ''
+        if: steps.winenative.outputs.cache-hit != 'true' && hashFiles('wine/build-native/tools/make_xftmpl') != ''
         uses: actions/cache/save@v4
         with:
           path: wine/build-native
-          key: wine-native-${{ env.WINE_SHA }}-v1
+          key: wine-native-${{ env.WINE_SHA }}-v2
 
       - name: Configure wine/build-macos (iOS arm64 cross) + headers
         shell: bash
@@ -277,6 +277,18 @@ jobs:
           ls include/dwrite.h include/config.h
 
       # ------------------------------------------------------------ Native unix sides
+      - name: SDK compat (rusage_info_v6.ri_page_wait_time_mach is newer than this SDK)
+        shell: bash
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          if grep -rq ri_page_wait_time_mach "$SDK/usr/include/sys/resource.h"; then
+            echo "SDK has the field; nothing to do"
+          else
+            # Only a timing figure in a diagnostic log line; reads 0 on this SDK.
+            sed -i '' 's/ru\.ri_page_wait_time_mach - pru\.ri_page_wait_time_mach/0/g' build/ntdll-unix/server_ios.c
+            grep -c ri_page_wait_time_mach build/ntdll-unix/server_ios.c || true
+            echo "::warning::SDK $(xcrun --sdk iphoneos --show-sdk-version) lacks ri_page_wait_time_mach; that log figure is 0"
+          fi
       - name: Build ntdll-unix
         shell: bash
         run: |
