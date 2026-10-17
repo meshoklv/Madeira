@@ -340,6 +340,14 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # build/dxmt-ios/shader-headers is git-ignored; generate the airconv shader
+          # headers the way dxmt/meson.build does (metal -> .air -> xxd -n <basename> -i).
+          OUT="$GITHUB_WORKSPACE/build/dxmt-ios/shader-headers"; mkdir -p "$OUT"
+          for sh in air_msad air_samplepos air_tessellation; do
+            xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 -o "$OUT/$sh.air" -c "dxmt/src/airconv/shaders/$sh.metal"
+            (cd "$OUT" && xxd -i "$sh.air" | sed "s/${sh}_air/${sh}/g" > "$sh.h")
+          done
+          ls -la "$OUT"
           bash build/dxmt-ios/build.sh 2>&1 | tee dxmt.log || {
             for f in build/dxmt-ios/obj/*.err; do grep -q 'error:' "$f" && { echo "== $f"; grep -m10 -B2 -A6 'error:' "$f"; }; done; exit 1; }
           cd build/dxmt-ios
