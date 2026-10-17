@@ -249,6 +249,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          export PATH="$GITHUB_WORKSPACE/$MINGW_DIR/bin:$PATH"   # configure insists on a PE cross compiler
           mkdir -p wine/build-macos && cd wine/build-macos
           ../configure --enable-win64 --disable-tests \
             CC="xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0" \
