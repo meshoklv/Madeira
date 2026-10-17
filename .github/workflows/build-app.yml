@@ -145,13 +145,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Same options as build/fex-ios/build.sh, plus Ninja and the processor
-          # CMake cannot infer in iOS cross mode.
+          # Same options as build/fex-ios/build.sh, plus Ninja, the processor CMake cannot
+          # infer in iOS cross mode, and TUNE_CPU (default "native" reads /proc/cpuinfo;
+          # cortex-a78 = what build/fex-arm64ec uses).
           cmake -S FEX -B FEX/build-ios -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DBUILD_THUNKS=OFF -DBUILD_FEXCONFIG=OFF \
             -DBUILD_FEX_LINUX_TESTS=OFF -DENABLE_FEX_ALLOCATOR=OFF -DENABLE_ASSERTIONS=OFF \
-            -DENABLE_CLANG_THUNKS=ON -DENABLE_CCACHE=OFF > fex-cfg.log 2>&1 || { tail -60 fex-cfg.log; exit 1; }
+            -DENABLE_CLANG_THUNKS=ON -DENABLE_CCACHE=OFF -DTUNE_CPU=cortex-a78 > fex-cfg.log 2>&1 || { tail -60 fex-cfg.log; exit 1; }
           grep -E 'ENABLE_LTO|TUNE_CPU|CMAKE_C_FLAGS:|CMAKE_CXX_FLAGS:' FEX/build-ios/CMakeCache.txt || true
           cmake --build FEX/build-ios --target FEXCore FEXCore_Base JemallocLibs cephes_128bit softfloat_3e fmt xxhash \
             > fex-build.log 2>&1 || { grep -m40 -B2 -A8 'error' fex-build.log; exit 1; }
