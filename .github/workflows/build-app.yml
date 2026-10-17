@@ -5,6 +5,8 @@ name: Build Madeira.app (unsigned)
 # Dock), on top of the committed DLL farm. No local patches to the product.
 on:
   workflow_dispatch:
+  push:
+    branches: [ci-build]
 
 concurrency:
   group: build-app
