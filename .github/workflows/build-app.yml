@@ -230,6 +230,7 @@ jobs:
         if: steps.winenative.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          export PATH="$GITHUB_WORKSPACE/$MINGW_DIR/bin:$PATH"   # configure insists on a PE cross compiler
           mkdir -p wine/build-native && cd wine/build-native
           ../configure --without-x --disable-tests > ../../wine-native-configure.log 2>&1 || { tail -40 ../../wine-native-configure.log; exit 1; }
           N=$(sysctl -n hw.ncpu)
