@@ -12388,6 +12388,100 @@ static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *
 #endif
 
 
+#ifdef WINE_IOS
+/**********************************************************************
+ *		ios_smc_same_check                     (exp/smc-same-bytes)
+ *
+ * DS3's protector rewrites its own .text ~240 times a second, and every one
+ * of those writes reaches [bus-data-av] below, becomes an AV, and makes FEX
+ * drop every translation of the 4 KB page and recompile it (~1,100
+ * compiles/s, docs DS3-SMC.md in dsr-kit). ml1001 saw 16 of 16 startup writes
+ * leave the bytes as they were -- but it compared at the NEXT fault, capped
+ * at 16, and could not tell "same value" from "dropped store".
+ *
+ * Here the store is decoded BEFORE it lands: the bytes it would write are
+ * built from the faulting registers and compared with what is in memory now.
+ *   1  = identical (the store is a no-op)    0 = it changes memory
+ *  -1  = not decoded (an encoding with writeback, SIMD, atomic, a page
+ *        crossing, or an address that does not match the fault)
+ * Only no-writeback GPR stores are decoded, so skipping one needs nothing but
+ * PC += 4. Reads only memory the caller has already proven readable (the
+ * whole access is required to sit inside the faulting 16 KB host page).
+ */
+static int ios_smc_same_check( ucontext_t *ctx, uint32_t insn, uintptr_t far,
+                               uint64_t *ea_out, unsigned *n_out )
+{
+    unsigned char val[16];
+    const int rt = insn & 0x1f, rn = (insn >> 5) & 0x1f;
+    const uint64_t base = (rn == 31) ? (uint64_t)SP_sig( ctx ) : (uint64_t)REGn_sig( rn, ctx );
+    uint64_t ea, v = ios_get_reg( ctx, rt ), v2 = 0;
+    unsigned size = insn >> 30, n = 1u << size;
+
+    if ((insn & 0x3FC00000) == 0x39000000)            /* STR* [Xn, #uimm12] */
+        ea = base + ((uint64_t)((insn >> 10) & 0xfff) << size);
+    else if ((insn & 0x3FE00C00) == 0x38000000 ||     /* STUR* [Xn, #simm9] */
+             (insn & 0x3FE00C00) == 0x19000000)       /* STLUR* (RCpc2)     */
+        ea = base + (uint64_t)(int64_t)((int32_t)(((insn >> 12) & 0x1ffu) << 23) >> 23);
+    else if ((insn & 0x3FFFFC00) == 0x089FFC00 ||     /* STLR*  [Xn]        */
+             (insn & 0x3FFFFC00) == 0x089F7C00)       /* STLLR* [Xn]        */
+        ea = base;
+    else if ((insn & 0x3FE00C00) == 0x38200800)       /* STR* [Xn, Rm{, ext}] */
+    {
+        const unsigned opt = (insn >> 13) & 7, s = (insn >> 12) & 1;
+        uint64_t off = ios_get_reg( ctx, (insn >> 16) & 0x1f );
+        switch (opt)
+        {
+        case 2: off = (uint32_t)off; break;                     /* UXTW */
+        case 3: case 7: break;                                  /* LSL / SXTX */
+        case 6: off = (uint64_t)(int64_t)(int32_t)off; break;   /* SXTW */
+        default: return -1;
+        }
+        ea = base + (off << (s ? size : 0));
+    }
+    else if ((insn & 0x7FC00000) == 0x29000000 ||     /* STP Wt1, Wt2, [Xn, #imm] */
+             (insn & 0xFFC00000) == 0xA9000000)       /* STP Xt1, Xt2, [Xn, #imm] */
+    {
+        const int is64 = insn >> 31;
+        int64_t imm7 = (int64_t)((int32_t)(((insn >> 15) & 0x7fu) << 25) >> 25);
+        n = is64 ? 16 : 8;
+        ea = base + (uint64_t)(imm7 * (is64 ? 8 : 4));
+        v2 = ios_get_reg( ctx, (insn >> 10) & 0x1f );
+        if (!is64) { v = (uint32_t)v; v2 = (uint32_t)v2; }
+        memcpy( val, &v, n / 2 );
+        memcpy( val + n / 2, &v2, n / 2 );
+        goto have_val;
+    }
+    else
+        return -1;
+    memcpy( val, &v, n > 8 ? 8 : n );
+
+have_val:
+    *ea_out = ea;
+    *n_out = n;
+    /* The decode must name the address the CPU faulted on, and the whole
+     * access must stay in that (readable) host page. */
+    if (far < ea || far >= ea + n) return -1;
+    if ((ea & ~(uint64_t)0x3fff) != ((ea + n - 1) & ~(uint64_t)0x3fff)) return -1;
+    return memcmp( (const void *)(uintptr_t)ea, val, n ) ? 0 : 1;
+}
+
+/* MADEIRA_SMC_SAME_SKIP: unset/0 = measure only (default), 1 = also skip
+ * identical stores into Wine-RX code pages instead of raising the AV. */
+static int ios_smc_same_skip_mode( void )
+{
+    static int mode = -1;
+    if (mode < 0)
+    {
+        const char *e = getenv( "MADEIRA_SMC_SAME_SKIP" );
+        mode = (e && e[0] == '1') ? 1 : 0;
+        dprintf( 2, "[smc-same] exp/smc-same-bytes v1 mode=%s (MADEIRA_SMC_SAME_SKIP=%s)\n",
+                 mode ? "SKIP identical stores" : "measure only", e ? e : "(unset)" );
+    }
+    return mode;
+}
+#endif
+
+
 /**********************************************************************
  *		bus_handler
  *
@@ -13091,6 +13185,56 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                         dprintf( 2, "[bus-data-av] pc=%p addr=%p esr=%08x rw=%lu\n",
                                  pc, siginfo->si_addr, esr,
                                  (unsigned long)vrec.ExceptionInformation[0] );
+                    /* exp/smc-same-bytes: is this write a no-op? Count every
+                     * outcome; with MADEIRA_SMC_SAME_SKIP=1 resume past an
+                     * identical store into a code page Wine holds R|X, so FEX
+                     * never sees it and keeps the page's translations. */
+                    {
+                        static volatile unsigned long long same_n, diff_n, undec_n, skip_n;
+                        static unsigned detail_n;
+                        uint32_t s_insn = 0;
+                        uint64_t s_ea = 0;
+                        unsigned s_n = 0;
+                        int s_res = -1, s_skip = 0;
+                        unsigned long long tot;
+
+                        if (ios_fault_read_insn( (uint64_t)(uintptr_t)PC_sig( bus_ctx ), &s_insn ))
+                            s_res = ios_smc_same_check( bus_ctx, s_insn, (uintptr_t)siginfo->si_addr,
+                                                        &s_ea, &s_n );
+                        if (s_res == 1)
+                        {
+                            __sync_add_and_fetch( &same_n, 1 );
+                            if (ios_smc_same_skip_mode())
+                            {
+                                extern int ios_page_expected_prot( const void *addr );
+                                int want = ios_page_expected_prot( siginfo->si_addr );
+                                s_skip = want > 0 && (want & PROT_EXEC) && !(want & PROT_WRITE);
+                            }
+                        }
+                        else if (s_res == 0) __sync_add_and_fetch( &diff_n, 1 );
+                        else __sync_add_and_fetch( &undec_n, 1 );
+                        if (s_skip) __sync_add_and_fetch( &skip_n, 1 );
+
+                        tot = same_n + diff_n + undec_n;
+                        if (detail_n < 24)
+                        {
+                            detail_n++;
+                            dprintf( 2, "[smc-same] #%llu %s insn=%08x addr=%p ea=%#llx n=%u pc=%p%s\n",
+                                     tot, s_res == 1 ? "SAME" : s_res == 0 ? "CHANGED" : "undecoded",
+                                     s_insn, siginfo->si_addr, (unsigned long long)s_ea, s_n, pc,
+                                     s_skip ? " -> skipped" : "" );
+                        }
+                        if ((tot & 0xfff) == 0)
+                            dprintf( 2, "[smc-same] totals=%llu same=%llu changed=%llu undecoded=%llu skipped=%llu "
+                                     "mode=%d\n", tot, same_n, diff_n, undec_n, skip_n,
+                                     ios_smc_same_skip_mode() );
+                        if (s_skip)
+                        {
+                            PC_sig( bus_ctx ) += 4;
+                            ios_fixup_x18_for_return( bus_ctx );
+                            return;
+                        }
+                    }
                     /* ml1048: NAME THE PAGE when the target is NOT the main image.
                      *
                      * The 16-line budget above is spent within seconds on the
