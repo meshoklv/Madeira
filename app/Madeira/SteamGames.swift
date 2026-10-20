@@ -1170,6 +1170,10 @@ struct SteamEntrySection: View {
     /// Steam's launch configuration is being read.
     @State private var programs: [String] = []
     @State private var resolving = false
+    /// Language: what the install record asks Valve's client for, and why a choice
+    /// is not in the record yet.
+    @State private var recordLanguage: String?
+    @State private var languageNote: String?
 
     var body: some View {
         let appID = entry.steamAppID ?? 0
@@ -1220,6 +1224,20 @@ struct SteamEntrySection: View {
                     DockInstallRequestRows(dock: dock, appID: appID, name: entry.title)
                 }
             }
+            // The game's language: Valve's client reads it from the install record and Madeira's
+            // downloads take its depots. Not while a download of the game runs: it writes the record.
+            let language = entry.steamLanguage ?? recordLanguage ?? "english"
+            Picker("Language", selection: Binding(get: { language }, set: { setLanguage($0, game: installed) })) {
+                ForEach(SteamLanguage.choices(supported: steam.game(appID)?.languages, current: language), id: \.code) {
+                    Text($0.name).tag($0.code)
+                }
+            }.pickerStyle(.navigationLink).disabled(download != nil)
+            if let languageNote {
+                Text(languageNote).font(.caption).foregroundStyle(.orange)
+            } else if !direct {
+                Text("Valve's client starts the game in this language, and first downloads its files when the game has its own.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let download {
                 SteamDownloadStatus(download: download)
                 switch download.state {
@@ -1262,6 +1280,11 @@ struct SteamEntrySection: View {
             freeSpace = values?.volumeAvailableCapacityForImportantUsage
         }
         .task(id: "\(entry.steamStart ?? "dock") \(installed?.installed == true) \(download == nil)") { await resolveProgram() }
+        .task(id: "\(installed?.library ?? "") \(download == nil)") {
+            guard let installed else { return }
+            let steamApps = MadeiraDock.drive.appendingPathComponent(installed.library, isDirectory: true)
+            recordLanguage = await Task.detached(priority: .utility) { SteamInstallFiles.language(appID: installed.id, steamApps: steamApps) }.value
+        }
         .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from this device. Saves stored elsewhere are kept.",
                             isPresented: $confirmUninstall, titleVisibility: .visible) {
             Button("Uninstall", role: .destructive) {
@@ -1295,6 +1318,20 @@ struct SteamEntrySection: View {
         LogStore.shared.log("[steam-start] app=\(entry.steamAppID ?? 0) program=choice")
     }
 
+    /// Language: kept on the entry, saved at once (a download reads it there), and written
+    /// into the installed game's record; a running session leaves that to its next Dock start.
+    private func setLanguage(_ code: String, game: DockGame?) {
+        guard SteamLanguage.valid(code), code != (entry.steamLanguage ?? recordLanguage ?? "english") else { return }
+        entry.steamLanguage = code
+        LibraryModel.shared.save(entry)
+        guard let game else { languageNote = nil; return }
+        switch SteamGameLanguage.apply(code, game: game) {
+        case .written, .same: recordLanguage = code; languageNote = nil
+        case .session: languageNote = "A session is running: the language is set at the game's next Madeira Dock start."
+        case .failed: languageNote = "This game's Steam install record could not be changed. It is tried again at the game's next Madeira Dock start."
+        }
+    }
+
     /// "The game": lists the install folder's programs and, unless the user picked one that
     /// is still there, takes Steam's launch configuration for the app (SteamDirectStart.choose);
     /// failing that, the only program when there is exactly one.
@@ -1326,5 +1363,28 @@ struct SteamEntrySection: View {
             entry.steamProgramSource = nil
         }
         LogStore.shared.log("[steam-start] app=\(appID) launch-entries=\(options.count) programs=\(found.count) source=\(entry.steamProgramSource ?? "none")")
+    }
+}
+
+/// A Steam game's language in its install record (`UserConfig.language`), where
+/// Valve's client reads it: it fetches that language's depots before it starts
+/// the game, which gets it from GetCurrentGameLanguage. Written by Game details ›
+/// Steam › Language and again at each Dock start of a game with a choice
+/// (ContentView.startDock), never while a session runs.
+enum SteamGameLanguage {
+    enum Record: String { case written, same, session, failed }
+
+    @MainActor @discardableResult
+    static func apply(_ code: String, game: DockGame) -> Record {
+        let record: Record
+        if wine_process_is_running() != 0 || wineserver_is_running() != 0 {
+            record = .session
+        } else {
+            let steamApps = MadeiraDock.drive.appendingPathComponent(game.library, isDirectory: true)
+            do { record = try SteamInstallFiles.setLanguage(code, appID: game.id, steamApps: steamApps) ? .written : .same }
+            catch { record = .failed }
+        }
+        LogStore.shared.log("[steam-language] app=\(game.id) language=\(code) record=\(record.rawValue)")
+        return record
     }
 }

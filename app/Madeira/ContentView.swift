@@ -3412,6 +3412,11 @@ struct ContentView: View {
                 try MadeiraDock.writeHandoff(account: signIn.accountName, token: signIn.refreshToken, appID: game.id)
             } catch { fail(error); return }
             MadeiraDock.configure(game, launchOption: launchOption)
+            // The game's language (Game details › Steam › Language), written again: the record
+            // may have been replaced since it was chosen, or a session ran then.
+            if let language = (profile ?? library.entries.first(where: { $0.steamAppID == game.id }))?.steamLanguage {
+                SteamGameLanguage.apply(language, game: game)
+            }
             // The game's one-time installs (its Steam install script) run first, in the same
             // session. No session runs yet, so the registry files can be read and written.
             // madeira-bcd: they run in a session of their own (DockInstallers.installsOnly), and

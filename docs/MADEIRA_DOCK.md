@@ -92,7 +92,10 @@ library session. The sheet has:
    Dock does not install games. They must already be installed in the prefix
    by Steam's client, for example with the desktop client, or copied together
    with their app manifest. Valve's client may still update a game's content
-   when Dock starts it, and Dock waits for that.
+   when Dock starts it, and Dock waits for that. A language chosen in Game
+   details › Steam › Language is written into the manifest's
+   `UserConfig.language` before the start, and the client fetches that
+   language's depots the same way (docs/STEAM_LIBRARY.md).
 4. **Smaller JIT pool (512 MB) for this launch.** Opt-in. The toggle starts
    from `env.MADEIRA_DOCK_COMPACT_POOL` and is off unless that is `1`.
 5. **One-time installs.** Listed for each installed game whose Steam install

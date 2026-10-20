@@ -91,7 +91,9 @@ class SteamLibraryFetcher {
     /// The app's metadata for an install, with the content metadata of the
     /// apps it shares depots with resolved. This never supplies depot keys or
     /// grants access: every later content request still goes to Valve.
-    func fetchInstallInfo(appID: UInt32) async throws -> SteamAppInfo? {
+    /// `language` is the install's (DepotDownloader.install); English's
+    /// depots are resolved too, for a language that has none of its own.
+    func fetchInstallInfo(appID: UInt32, language: String = "english") async throws -> SteamAppInfo? {
         try Task.checkCancellation()
         guard var app = try await fetchAppInfo(appID: appID) else { return nil }
         try Task.checkCancellation()
@@ -99,7 +101,7 @@ class SteamLibraryFetcher {
         var visited: Set<UInt32> = [appID], references = Set<String>()
         func eligible(_ d: SteamAppInfo.DepotInfo) -> Bool {
             !d.isSharedInstall && d.dlcAppID == nil && d.supports(os: "windows") &&
-                !d.lowViolence && (d.language.isEmpty || d.language.lowercased() == "english")
+                !d.lowViolence && (d.language.isEmpty || d.language.lowercased() == "english" || d.language.lowercased() == language)
         }
         var pending = app.depots.filter { eligible($0) && $0.publicManifestID == nil && $0.fromApp != nil }
             .map { ($0.fromApp!, $0.depotID) }
@@ -133,7 +135,7 @@ class SteamLibraryFetcher {
         guard missing.isEmpty else { throw SteamFileError.invalid("Steam did not provide required shared content metadata. Refresh and retry the download.") }
         // The direct owner of each selected shared depot, for its install
         // record. Metadata only; Valve still decides access and launch readiness.
-        for id in Set(app.installDepots().compactMap(\.fromApp)).subtracting([appID]).sorted() {
+        for id in Set(app.installDepots(language: language).compactMap(\.fromApp)).subtracting([appID]).sorted() {
             try Task.checkCancellation()
             if owners[id] == nil {
                 guard owners.count <= 64 else { break }

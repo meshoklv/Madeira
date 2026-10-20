@@ -32,6 +32,9 @@ struct SteamAppInfo {
     /// SteamDirectStart and Madeira Dock select an installed Windows entry;
     /// Dock passes its original key to Valve's client.
     var launches: [SteamLaunchOption] = []
+    /// The languages the app lists as supported (`common.supported_languages`),
+    /// by Steam's API names; empty when it lists none.
+    var supportedLanguages: [String] = []
     /// Steam Auto-Cloud configuration (`ufs`): which files of the game are its
     /// saves, and where another platform keeps them. Empty for a game that
     /// only uses the Steam Cloud API (its files live in the user's `remote` folder).
@@ -159,6 +162,7 @@ struct SteamAppInfo {
     /// to 32-bit depots when the app only publishes those.
     func installDepots(os: String = "windows", arch: String = "64",
                        language: String = "english") -> [DepotInfo] {
+        let language = depotLanguage(language, os: os)
         func select(_ arch: String) -> [DepotInfo] {
             depots.filter { d in
                 d.supports(os: os) && d.dlcAppID == nil && !d.isSharedInstall &&
@@ -175,10 +179,20 @@ struct SteamAppInfo {
         return preferred
     }
 
+    /// The language whose depots an install takes: the one asked for, or
+    /// English when the app has no depots of that language (its text is then
+    /// in the common content, and English's depots keep the install whole).
+    func depotLanguage(_ language: String, os: String = "windows") -> String {
+        depots.contains { d in
+            d.supports(os: os) && d.dlcAppID == nil && !d.lowViolence && d.language.caseInsensitiveCompare(language) == .orderedSame
+        } ? language : "english"
+    }
+
     /// Every depot with why it was or was not selected, for the install log
     /// ("sel", or the first failing rule). IDs and flags only.
     func depotSelectionSummary(os: String = "windows", arch: String = "64",
                                language: String = "english", limit: Int = 24) -> String {
+        let language = depotLanguage(language, os: os)
         let chosen = Set(installDepots(os: os, arch: arch, language: language).map(\.depotID))
         return depots.sorted { $0.depotID < $1.depotID }.prefix(limit).map { d in
             let why = selectionRule(d, chosen: chosen, os: os, language: language)
@@ -261,6 +275,11 @@ struct SteamAppInfo {
                 info.libraryHero = asset((assets["library_hero"] as? [String: Any])?["image"])
             }
             info.headerImage = asset(common["header_image"])
+            if let languages = common["supported_languages"] as? [String: Any] {
+                info.supportedLanguages = languages.compactMap { key, value in
+                    ((value as? [String: Any])?["supported"] as? String) == "true" ? key.lowercased() : nil
+                }.sorted()
+            }
             if let parent = (common["parent"] as? String).flatMap(UInt32.init), parent != 0, parent != info.appID {
                 info.parentID = parent
             }
