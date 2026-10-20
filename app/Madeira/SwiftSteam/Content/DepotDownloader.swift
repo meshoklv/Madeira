@@ -76,13 +76,15 @@ final class DepotDownloader {
     /// Download an app into `steamApps/common/<installdir>` and write its
     /// appmanifest. Returns the install folder. Throws CancellationError when
     /// the calling task is cancelled; completed chunks stay journaled.
-    func install(_ app: SteamAppInfo, steamApps: URL,
+    /// `language` (Steam's API name) selects the language depots, and the
+    /// record states it as asked for and as installed.
+    func install(_ app: SteamAppInfo, steamApps: URL, language: String = "english",
                  ownedDepots: @escaping () async -> Set<UInt32>? = { nil },
                  progress report: @escaping (SteamDownloadProgress) -> Void) async throws -> URL {
-        let depots = app.installDepots()
+        let depots = app.installDepots(language: language)
         guard !depots.isEmpty else { throw SteamError.depotNotFound(app.appID) }
         // Before the key requests, so a refused depot still has its selection logged.
-        SteamLog.event("[steam-depot] selection app=\(app.appID) build=\(app.buildID) \(app.depotSelectionSummary())")
+        SteamLog.event("[steam-depot] selection app=\(app.appID) build=\(app.buildID) language=\(language) \(app.depotSelectionSummary(language: language))")
 
         let folderName = SteamInstallFiles.safeFolderName(app.installDir.isEmpty ? "app_\(app.appID)" : app.installDir)
         let installURL = steamApps.appendingPathComponent("common", isDirectory: true)
@@ -227,7 +229,7 @@ final class DepotDownloader {
         try AppManifestWriter.writeManifest(
             appID: app.appID, name: app.name, installDir: folderName, buildID: app.buildID,
             steamID: accountID, sizeOnDisk: prepared.totalUncompressed,
-            steamAppsPath: steamApps.path, installedDepots: own,
+            steamAppsPath: steamApps.path, language: language, installedDepots: own,
             sharedDepots: shared.map { ($0.depotID, Int(owners[UInt32($0.depotID)]!)) },
             customExecutables: custom)
         if !shared.isEmpty {

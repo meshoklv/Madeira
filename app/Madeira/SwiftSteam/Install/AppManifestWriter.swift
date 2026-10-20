@@ -29,6 +29,7 @@ struct AppManifestWriter {
     /// (`steamAppsPath`). `installedDepots` is what Steam trusts as a complete
     /// install. `buildID` is the depot build id from PICS (0 if unknown; Steam
     /// may then flag the install for verification on the next launch).
+    /// `language` is the one the depots were selected for.
     static func writeManifest(
         appID: UInt32,
         name: String,
@@ -37,6 +38,7 @@ struct AppManifestWriter {
         steamID: UInt64,
         sizeOnDisk: UInt64 = 0,
         steamAppsPath: String,
+        language: String = "english",
         installedDepots: [InstalledDepot]? = nil,
         sharedDepots: [(depotID: Int, ownerAppID: Int)] = [],
         customExecutables: [String] = []
@@ -126,15 +128,16 @@ struct AppManifestWriter {
         }
 
         // UserConfig and MountedConfig are present in every record Steam
-        // writes; Steam uses them to select language-pack depots. English is
-        // always written (the downloader installs English content).
+        // writes; Steam uses them to select language-pack depots. Both state the
+        // language the downloader installed (asked for, and what is mounted).
+        let language = SteamLanguage.valid(language) ? language : "english"
         lines.append("\t\"UserConfig\"")
         lines.append("\t{")
-        lines.append("\t\t\"language\"\t\t\"english\"")
+        lines.append("\t\t\"language\"\t\t\"\(language)\"")
         lines.append("\t}")
         lines.append("\t\"MountedConfig\"")
         lines.append("\t{")
-        lines.append("\t\t\"language\"\t\t\"english\"")
+        lines.append("\t\t\"language\"\t\t\"\(language)\"")
         lines.append("\t}")
 
         lines.append("}")

@@ -7,8 +7,8 @@ through Madeira Dock like any other Steam game in the prefix.
 The code is `app/Madeira/SteamOwnedLibrary.swift` (the model),
 `app/Madeira/SteamGames.swift` (the library's Steam section, the download
 sheet and the Steam section of a game's Game details page),
-`app/Madeira/SteamInstall.swift` (where a download lives and how one is
-removed), `app/Madeira/SteamDownloadBackground.swift` (downloads in the
+`app/Madeira/SteamInstall.swift` (where a download lives, how one is
+removed and the language its record asks for), `app/Madeira/SteamDownloadBackground.swift` (downloads in the
 background), the Steam parts of `app/Madeira/Library.swift` (a Steam game's
 library entry and Game details page), and `app/Madeira/SwiftSteam/` (the
 Steam connection, product info, depot downloader, content decoders and install
@@ -54,7 +54,8 @@ The page has, in this order:
   per-launch choice) and **One-time installs**, **Run at next start** or
   **Skip** (Dock's choice for the game's Steam install scripts, when it has
   any), with **Record as done…** and **Reset one-time installs…** (applied at
-  the game's next Dock start; docs/MADEIRA_DOCK.md); under The game, **Program**; an update's progress with **Pause update** / **Resume update**,
+  the game's next Dock start; docs/MADEIRA_DOCK.md); under The game, **Program**;
+  **Language** (below); an update's progress with **Pause update** / **Resume update**,
   or **Update available — download**; **Repair installed files**; App ID; free
   space; the last Dock result; **Uninstall** (with a confirmation);
 - **Display**, **Compatibility & performance** (reduced-precision x87,
@@ -71,6 +72,19 @@ without Valve's client components or without a sign-in. Launch arguments are
 not offered: Dock starts Steam's own launch option. The session keeps Dock's
 starting screen until the game's own window is shown (`docs/MADEIRA_DOCK.md`,
 "Starting screen").
+
+**Language** is the game's language, by Steam's API name (`russian`,
+`schinese`, ...): the languages the app lists as supported when its product
+info is cached, else all of Steam's. A choice is kept on the entry
+(`steamLanguage`) and written into the install record's `UserConfig.language`
+at once (only that value changes; the file is replaced atomically) unless a
+session runs, and again at each Dock start. `MountedConfig` is left alone: it
+states what is installed, and Valve's client compares the two, fetches the
+language's depots before it starts the game (Dock waits for that), records them
+and updates `MountedConfig` itself; the game gets the language from
+`GetCurrentGameLanguage`. Madeira's own downloads take the same language: its
+depots (English's when the app has none of that language), and both values in
+the record they write. The picker is off while the game downloads.
 
 **Start with: The game** starts the game's own program in Wine, without Steam
 or Madeira Dock, like a game added to the library. It suits games that run
@@ -231,8 +245,9 @@ result codes, never payloads or credentials).
 `[steam-library]`, `[steam-depot]`, `[steam-repair]`, `[steam-cdn]`,
 `[steam-shared]`, `[steam-shared-record]`, `[steam-record]`, `[steam-playtime]`,
 `[steam-account]`, `[steam-games]`, `[steam-start]` (Start with: the mode,
-where the program came from, how many launch entries and programs) and
-`[bg-download]`. They carry App IDs,
+where the program came from, how many launch entries and programs),
+`[steam-language]` (the App ID, the language and whether the record was
+written) and `[bg-download]`. They carry App IDs,
 depot IDs, counts and short reason codes. No account name, Steam ID, token,
 game name or path is logged (the host test checks this on a full install).
 
@@ -331,7 +346,7 @@ as in Jfishin's tree; the name is generic.
 | `Content/DepotManifest.swift` | 175 | 163 | Jfishin; unused diff code removed |
 | `Library/SteamAppInfo.swift` | 333 | 157 | Jfishin, extended (shared depots, artwork names); his launch, Cloud and licence-agreement parts removed; `SteamLaunchOption` (the launch configuration for Start with: The game) is 125hz's |
 | `Library/SteamLibraryFetcher.swift` | 351 | 251 | Jfishin, extended (licensed depots, shared metadata); the hidden-app report removed |
-| `Install/AppManifestWriter.swift` | 184 | 101 | Jfishin's record writer (176 lines, in a folder named DRM in his tree; it writes Steam's own `appmanifest` format and nothing else), extended by 125hz: installed depots, shared depots, `CheckGuid` |
+| `Install/AppManifestWriter.swift` | 184 | 101 | Jfishin's record writer (176 lines, in a folder named DRM in his tree; it writes Steam's own `appmanifest` format and nothing else), extended by 125hz: installed depots, shared depots, `CheckGuid`, the language |
 | `lzma_shim.c/.h` | 85 | n/a | Jfishin |
 | `zstd_edu.c/.h` | 2056 | n/a | Meta Platforms (BSD-3-Clause selected), with Jfishin's error-safe wrapper; 1,986 lines identical to his copy |
 | `chunk_zip.c/.h` | 73 | n/a | 125hz |
@@ -414,8 +429,8 @@ Madeira Dock or as The game).
 ## Not included, and limits
 
 - No Steam Cloud, no achievements, no workshop content, no DLC installation,
-  no branch (beta) selection, no language selection: English, the public
-  branch.
+  no branch (beta) selection: the public branch. The language is English
+  unless Game details › Steam › Language chooses another.
 - A file that a newer build no longer contains is not deleted by an update
   (the install keeps it); **Uninstall** removes the whole folder.
 - Only the account's licenses are read; family sharing and free-on-demand

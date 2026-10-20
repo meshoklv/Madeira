@@ -39,6 +39,9 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     /// Steam's launch configuration, for "Start with: The game" (SteamDirectStart);
     /// nil in older caches, which then ask Steam once (SteamOwnedLibrary.launchOptions).
     var launches: [SteamLaunchOption]?
+    /// The languages the app supports (Steam's API names), for Game details ›
+    /// Steam › Language; nil in older caches and when it lists none (all are offered).
+    var languages: [String]?
 
     init(_ info: SteamAppInfo) {
         id = Int(info.appID)
@@ -48,6 +51,7 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
         libraryCapsule = info.libraryCapsule; libraryHero = info.libraryHero; headerImage = info.headerImage
         parentID = info.parentID.map(Int.init)
         launches = info.launches
+        languages = info.supportedLanguages.isEmpty ? nil : info.supportedLanguages
     }
 
     var folderName: String { SteamInstallFiles.safeFolderName(installDir.isEmpty ? "app_\(id)" : installDir) }
@@ -342,6 +346,7 @@ final class SteamOwnedLibrary: ObservableObject {
             guard let info = try await fetcher.fetchAppInfo(appID: UInt32(appID)) else { return nil }
             if let index = owned.firstIndex(where: { $0.id == appID }) {
                 owned[index].launches = info.launches
+                if !info.supportedLanguages.isEmpty { owned[index].languages = info.supportedLanguages }
                 writeCache()
             }
             SteamLog.event("[steam-start] launch configuration app=\(appID) entries=\(info.launches.count)")
@@ -1049,11 +1054,16 @@ final class SteamOwnedLibrary: ObservableObject {
     private func run(_ appID: Int) async {
         var outcome = SteamDownloadBackground.Outcome.paused
         do {
-            guard let info = try await fetcher.fetchInstallInfo(appID: UInt32(appID)) else {
+            // The game's language (Game details › Steam › Language), else the one its record
+            // asks for: an update keeps it instead of going back to English.
+            let chosen = LibraryModel.shared.entries.first { $0.steamAppID == appID }?.steamLanguage
+            let language = chosen.flatMap { SteamLanguage.valid($0) ? $0 : nil }
+                ?? SteamInstallFiles.language(appID: appID, steamApps: Self.steamApps) ?? "english"
+            guard let info = try await fetcher.fetchInstallInfo(appID: UInt32(appID), language: language) else {
                 throw SteamError.appInfoNotFound(UInt32(appID))
             }
             try FileManager.default.createDirectory(at: SteamInstallPaths.common(drive: Self.drive), withIntermediateDirectories: true)
-            let folder = try await downloader.install(info, steamApps: Self.steamApps,
+            let folder = try await downloader.install(info, steamApps: Self.steamApps, language: language,
                                                       ownedDepots: { [weak self] in try? await self?.fetcher.ownedDepotIDs() }) { [weak self] progress in
                 self?.downloads[appID]?.progress = progress
                 SteamDownloadBackground.shared.progress(progress)

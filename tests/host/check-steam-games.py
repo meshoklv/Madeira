@@ -78,7 +78,8 @@ require('SteamEntrySection(entry: $entry)' in detail and 'if entry.steamAppID !=
         'Game details: the Steam section for a Steam game')
 for label in ['"Start with"', '"Madeira Dock"', '"Smaller JIT pool (512 MB) for this launch"', '"One-time installs"',
               '"Run at next start"', '"Skip"', '"Repair installed files"', '"Uninstall"', '"App ID"',
-              '"Free space on this device"', '"Pause update"', '"Resume update"', '"The game"', '"Program"', '"Choose…"']:
+              '"Free space on this device"', '"Pause update"', '"Resume update"', '"The game"', '"Program"', '"Choose…"',
+              '"Language"']:
     require(label in steam_section, f'Steam section: {label}')
 for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"', '"Display"', '"Resolution"',
               '"Aspect & scaling"', '"Compatibility & performance"', '"Reduced-precision x87"', '"CPU cores reported"',
@@ -87,6 +88,23 @@ for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"'
     require(label in detail, f'Game details: {label}')
 require('if entry.desktop != true && entry.steamAppID == nil {' in detail,
         "no Launch arguments for a Steam game: Dock starts Steam's own launch option")
+# Language: kept on the entry, written into the install record (UserConfig only) unless a session runs, again
+# at each Dock start, and taken by Madeira's downloads.
+require('Picker("Language", selection: Binding(get: { language }, set: { setLanguage($0, game: installed) }))' in steam_section and
+        '.disabled(download != nil)' in steam_section and 'entry.steamLanguage = code\n        LibraryModel.shared.save(entry)' in steam_section,
+        'Steam section: Language, kept on the entry at once, not while the game downloads')
+language_apply = games[games.index('enum SteamGameLanguage {'):]
+require('wine_process_is_running() != 0 || wineserver_is_running() != 0' in language_apply and
+        'SteamInstallFiles.setLanguage(code, appID: game.id, steamApps: steamApps)' in language_apply and
+        'LogStore.shared.log("[steam-language] app=\\(game.id) language=\\(code) record=\\(record.rawValue)")' in language_apply,
+        'the language is written into the record only while no session runs, and logged by App ID and language')
+dock_start_body = content_view[content_view.index('    private func startDock('):]
+require(dock_start_body.index('MadeiraDock.configure(game, launchOption: launchOption)') <
+        dock_start_body.index('SteamGameLanguage.apply(language, game: game)') < dock_start_body.index('DockInstallers.prepare('),
+        "a Dock start writes the game's language into its record again, before the session starts")
+require('fetchInstallInfo(appID: UInt32(appID), language: language)' in owned_source and
+        'downloader.install(info, steamApps: Self.steamApps, language: language,' in owned_source,
+        "Madeira's downloads take the game's language")
 entries_start = library.index('private var entries: [LibraryEntry] {')
 require('$0.steamAppID == nil' in library[entries_start:library.index('var body: some View {', entries_start)],
         'Steam games are listed in the Steam section only, not also under Games')

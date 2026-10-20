@@ -270,6 +270,11 @@ struct LibraryEntry: Codable, Identifiable {
     var steamProgramArguments: String?
     var steamProgramFolder: String?
     var steamProgramSource: String?
+    /// The language Valve's client installs and starts the game in (Game details ›
+    /// Steam › Language), by Steam's API name ("russian"): written into its install
+    /// record as `UserConfig.language` and taken by Madeira's downloads. nil: no
+    /// choice, the record's own (English for Madeira's downloads).
+    var steamLanguage: String?
     /// The install folder, build and picked program a Steam game's `bits` and
     /// `graphicsAPI` were read for, and whether Steam's launch configuration was
     /// cached (LibraryModel.refreshSteamMetadata); any change reads them again.

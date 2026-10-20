@@ -795,6 +795,65 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     require(info.buildID == 4242 && info.installableOnWindows && info.installDir == "Fixture Game", "build id, install folder and Windows installability")
     require(info.libraryCapsule == "cap/1.jpg" && info.parentID == nil, "artwork name; a parent equal to itself is not kept")
     require(info.depotSelectionSummary().contains("103[-]lang") && info.depotSelectionSummary().contains("107[-]dlc"), "the selection log names the rule that left a depot out")
+    // A language's own depots replace English's; a language without any keeps English's.
+    require(info.installDepots(language: "german").map(\.depotID) == [101, 103, 105] &&
+            info.depotSelectionSummary(language: "german").contains("102[-]lang"), "German: common, German, 64-bit only")
+    require(info.installDepots(language: "russian").map(\.depotID) == [101, 102, 105] && info.depotLanguage("russian") == "english",
+            "a language without depots of its own takes English's")
+    let languages = SteamAppInfo.parse(appID: 10, from: appVDF(#"""
+    "common" { "name" "Langs" "type" "Game" "oslist" "windows" "supported_languages" { "english" { "supported" "true" } "Russian" { "supported" "true" "full_audio" "true" } "german" { "supported" "false" } } }
+    """#))!
+    require(languages.supportedLanguages == ["english", "russian"] && SteamOwnedGame(languages).languages == ["english", "russian"] &&
+            SteamOwnedGame(info).languages == nil, "supported languages: only those marked supported, by API name; none listed is nil")
+    require(SteamLanguage.choices(supported: ["english", "russian"], current: "english").map(\.code) == ["english", "russian"] &&
+            SteamLanguage.choices(supported: ["english"], current: "german").map(\.code) == ["english", "german"] &&
+            SteamLanguage.choices(supported: nil, current: "english").count == SteamLanguage.all.count &&
+            SteamLanguage.valid("koreana") && SteamLanguage.valid("latam") && !SteamLanguage.valid("korean") && !SteamLanguage.valid("russian\""),
+            "the Language picker: the app's supported languages (the current one kept), else all of Steam's API names")
+
+    // ---- the install record's language
+    let records = FileManager.default.temporaryDirectory.appendingPathComponent("madeira-language-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.removeItem(at: records)
+    try FileManager.default.createDirectory(at: records, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: records) }
+    try AppManifestWriter.writeManifest(appID: 374320, name: "Fixture \"Three\"", installDir: "DARK SOULS III", buildID: 9, steamID: 0,
+                                        steamAppsPath: records.path,
+                                        installedDepots: [AppManifestWriter.InstalledDepot(depotID: 374321, manifestGID: 5, size: 7)])
+    let recordURL = records.appendingPathComponent("appmanifest_374320.acf")
+    let written = try String(contentsOf: recordURL, encoding: .utf8)
+    require(SteamInstallFiles.language(appID: 374320, steamApps: records) == "english", "a downloaded record asks for English by default")
+    let first = try SteamInstallFiles.setLanguage("russian", appID: 374320, steamApps: records)
+    let edited = try String(contentsOf: recordURL, encoding: .utf8)
+    require(first && edited == written.replacingOccurrences(of: "\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"english\"",
+                                                            with: "\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"russian\"") &&
+            edited.contains("\"MountedConfig\"\n\t{\n\t\t\"language\"\t\t\"english\"") && edited != written,
+            "a language is written: only UserConfig's value changes; MountedConfig (what is installed) and every other byte stay")
+    require(SteamInstallFiles.language(appID: 374320, steamApps: records) == "russian", "the record now asks for Russian")
+    let again = try SteamInstallFiles.setLanguage("russian", appID: 374320, steamApps: records)
+    require(!again, "the same language again writes nothing")
+    let bare = Data("\u{FEFF}\"AppState\"\n{\n\t\"appid\"\t\t\"5\" // note {\n\t\"name\"\t\t\"a \\\"}\\\" b\"\n}\n".utf8)
+    let added = SteamInstallFiles.settingLanguage("german", in: bare).map { String(decoding: $0, as: UTF8.self) }
+    require(added == "\u{FEFF}\"AppState\"\n{\n\t\"appid\"\t\t\"5\" // note {\n\t\"name\"\t\t\"a \\\"}\\\" b\"\n\t\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"german\"\n\t}\n}\n",
+            "a record without UserConfig gets one (comments and escaped braces in values are not structure)")
+    let empty = SteamInstallFiles.settingLanguage("polish", in: Data("\"AppState\" { \"appid\" \"5\" \"userconfig\" { \"betakey\" \"x\" } }".utf8))
+        .map { String(decoding: $0, as: UTF8.self) }
+    require(empty == "\"AppState\" { \"appid\" \"5\" \"userconfig\" {\n\t\t\"language\"\t\t\"polish\" \"betakey\" \"x\" } }",
+            "a UserConfig without a language gets one, its other keys kept")
+    for bad in ["\"AppState\" { \"appid\" \"5\"", "\"Other\" { }", "\"AppState\" { \"UserConfig\" { \"language\" } }", "\"AppState\" \"x\"", "\"AppState\" { \"a\" \"b"] {
+        require(SteamInstallFiles.settingLanguage("german", in: Data(bad.utf8)) == nil, "an unreadable record is not changed: \(bad.prefix(24).debugDescription)")
+    }
+    let deep = "\"AppState\" { " + String(repeating: "\"k\" { ", count: 5000) + String(repeating: "} ", count: 5000) + "}"
+    require(SteamInstallFiles.settingLanguage("german", in: Data(deep.utf8)) == nil, "a record nested too deeply is not changed (and does not exhaust the stack)")
+    require(SteamInstallFiles.settingLanguage("german\" \"x", in: Data("\"AppState\" { }".utf8)) == nil, "only Steam's language names are written")
+    do { _ = try SteamInstallFiles.setLanguage("german", appID: 4242, steamApps: records); require(false, "no record, nothing written") }
+    catch { require(!FileManager.default.fileExists(atPath: records.appendingPathComponent("appmanifest_4242.acf").path), "no record, nothing written") }
+    try AppManifestWriter.writeManifest(appID: 374320, name: "Fixture", installDir: "DARK SOULS III", buildID: 10, steamID: 0,
+                                        steamAppsPath: records.path, language: "russian")
+    let update = try String(contentsOf: recordURL, encoding: .utf8)
+    require(update.contains("\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\"russian\"") &&
+            update.contains("\"MountedConfig\"\n\t{\n\t\t\"language\"\t\t\"russian\""),
+            "a download in a language records it as asked for and as installed")
+
     let legacy = SteamAppInfo.parse(appID: 10, from: appVDF(#"""
     "common" { "name" "Old" "type" "Game" "oslist" "windows" } "config" { "installdir" "Old" }
     "depots" { "201" { "config" { "oslist" "windows" "osarch" "32" } "manifests" { "public" "2001" } } "202" { "manifests" { "public" "2002" } } }
