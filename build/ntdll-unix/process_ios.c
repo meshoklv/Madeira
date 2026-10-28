@@ -1942,6 +1942,38 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         }
     }
 
+    /* ds3-coop: env.MADEIRA_CHILD_REDIRECT = "<exe name>=<DOS path>": the FIRST spawn of <exe name> starts <DOS path> instead. */
+    {
+        static int redirect_done;
+        const char *spec = getenv( "MADEIRA_CHILD_REDIRECT" ), *eq = spec ? strchr( spec, '=' ) : NULL;
+        char name[64];
+        int nl = eq ? (int)(eq - spec) : 0, k;
+
+        if (!redirect_done && eq && nl > 0 && nl < (int)sizeof(name))
+        {
+            for (k = 0; k < nl; k++) name[k] = (spec[k] >= 'A' && spec[k] <= 'Z') ? spec[k] + 32 : spec[k];
+            name[nl] = 0;
+            if (ios_image_name_is( params->ImagePathName.Buffer, params->ImagePathName.Length / sizeof(WCHAR), name ))
+            {
+                int dl = (int)strlen( eq + 1 );
+                WCHAR *dos = malloc( (dl + 1) * sizeof(WCHAR) ), *nt = malloc( (dl + 5) * sizeof(WCHAR) ), *cl = malloc( (dl + 3) * sizeof(WCHAR) );
+                if (dos && nt && cl)
+                {
+                    redirect_done = 1;
+                    for (k = 0; k < dl; k++) dos[k] = (WCHAR)(unsigned char)eq[1 + k];
+                    dos[dl] = 0;
+                    nt[0] = '\\'; nt[1] = '?'; nt[2] = '?'; nt[3] = '\\';
+                    memcpy( nt + 4, dos, (dl + 1) * sizeof(WCHAR) );
+                    cl[0] = '"'; memcpy( cl + 1, dos, dl * sizeof(WCHAR) ); cl[dl + 1] = '"'; cl[dl + 2] = 0;
+                    RtlInitUnicodeString( &path, nt );                       /* the file Wine opens */
+                    RtlInitUnicodeString( &params->ImagePathName, dos );     /* what the process sees */
+                    RtlInitUnicodeString( &params->CommandLine, cl );        /* game arguments are dropped on purpose */
+                    dprintf( 2, "[child-redirect] %s -> %s\n", name, eq + 1 );
+                }
+            }
+        }
+    }
+
 
     /* madeira-bcd: a console's conhost.exe starts without a window (see
      * console_headless_cmdline); env.MADEIRA_CONSOLE_WINDOW=1 keeps it. */
