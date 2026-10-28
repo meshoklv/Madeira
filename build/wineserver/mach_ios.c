@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <strings.h>   /* strncasecmp, ds3-coop local-write-target */
 #include <fcntl.h>   /* ml1003: O_RDONLY for the escape-hatch read */
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -1138,6 +1139,7 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
     kern_return_t ret;
     mach_port_t process_port = get_process_port( process );
     mach_vm_offset_t data;
+    int local = 0;
 
     if (written) *written = 0;
 
@@ -1145,18 +1147,50 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
     /* ds3-coop: opt-in local writes, the write side of ml1003. A mod launcher
      * (DS3 Seamless Co-op) writes its DLL path into the game it started, then
      * runs LoadLibraryA there; denied, the game gets LoadLibraryA(".dll").
-     * Off by default (get_process_port() records that enabling writes for every
-     * caller regressed Steam); madeira.cfg local-write = 1 turns it on. */
-    if (!process_port && process->unix_pid == getpid())
+     * Off by default: get_process_port() records that enabling writes for every
+     * caller regressed Steam. Only a target whose exe is listed in
+     * madeira.cfg "local-write-target" (';'-separated names, e.g.
+     * darksoulsiii.exe) gets them, so Steam, CEF, crashpad and debugger attach
+     * keep the ACCESS_DENIED they were tuned to. */
+    if (!process_port && process->unix_pid == getpid() && process->image)
     {
-        static int local_write_on = -1;
-        if (local_write_on < 0)
+        static char targets[256];
+        static int targets_read;
+        char name[64];
+        int n = 0, k, base = 0, len = process->imagelen / sizeof(WCHAR);
+
+        if (!targets_read)
         {
-            local_write_on = madeira_cfg_bool( "local-write", 0 );
-            fprintf( stderr, "ds3-coop: local pseudo-process writes %s\n",
-                     local_write_on ? "ENABLED by local-write" : "denied (local-write = 1 enables)" );
+            targets_read = 1;
+            if (!madeira_cfg_get( "local-write-target", targets, sizeof(targets) )) targets[0] = 0;
+            fprintf( stderr, "ds3-coop: local pseudo-process writes %s%s\n",
+                     targets[0] ? "ENABLED for " : "denied (local-write-target unset)", targets );
         }
-        if (local_write_on) process_port = mach_task_self();
+        for (k = 0; k < len; k++) if (process->image[k] == '\\' || process->image[k] == '/') base = k + 1;
+        for (k = base; k < len && n < (int)sizeof(name) - 1; k++)
+        {
+            WCHAR c = process->image[k];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            name[n++] = c < 128 ? (char)c : '?';
+        }
+        name[n] = 0;
+        if (targets[0] && n)
+        {
+            const char *t = targets;
+            while (*t)
+            {
+                const char *e = strchr( t, ';' );
+                int tl = e ? (int)(e - t) : (int)strlen( t );
+                if (tl == n && !strncasecmp( t, name, n ))
+                {
+                    process_port = mach_task_self();
+                    local = 1;
+                    break;
+                }
+                if (!e) break;
+                t = e + 1;
+            }
+        }
     }
 #endif
 
@@ -1186,7 +1220,10 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
      * In that case mach_vm_write returns KERN_INVALID_ADDRESS.
      */
 
-    if (ret == KERN_INVALID_ADDRESS)
+    /* local: never take the protect + task_suspend fallback below; on our own
+     * task it would suspend the wineserver thread itself. A LoadLibrary path
+     * only needs committed RW memory. */
+    if (ret == KERN_INVALID_ADDRESS && !local)
     {
         mach_vm_address_t current_address = (mach_vm_address_t)ptr;
         mach_vm_address_t region_address = current_address;
