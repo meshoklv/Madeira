@@ -1141,6 +1141,25 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
 
     if (written) *written = 0;
 
+#ifdef WINE_IOS
+    /* ds3-coop: opt-in local writes, the write side of ml1003. A mod launcher
+     * (DS3 Seamless Co-op) writes its DLL path into the game it started, then
+     * runs LoadLibraryA there; denied, the game gets LoadLibraryA(".dll").
+     * Off by default (get_process_port() records that enabling writes for every
+     * caller regressed Steam); madeira.cfg local-write = 1 turns it on. */
+    if (!process_port && process->unix_pid == getpid())
+    {
+        static int local_write_on = -1;
+        if (local_write_on < 0)
+        {
+            local_write_on = madeira_cfg_bool( "local-write", 0 );
+            fprintf( stderr, "ds3-coop: local pseudo-process writes %s\n",
+                     local_write_on ? "ENABLED by local-write" : "denied (local-write = 1 enables)" );
+        }
+        if (local_write_on) process_port = mach_task_self();
+    }
+#endif
+
     if (!process_port)
     {
         set_error( STATUS_ACCESS_DENIED );
