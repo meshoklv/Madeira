@@ -3042,6 +3042,117 @@ static NTSTATUS invoke_user_apc( CONTEXT *context, const struct user_apc *apc, N
 }
 
 
+/* madeira: CROSS-PROCESS THREAD START REBASE (APC_CREATE_THREAD).
+ *
+ * The classic DLL injector (DS3 Seamless Co-op launcher) does
+ * CreateRemoteThread(target, GetProcAddress(kernel32, "LoadLibraryA"), buf):
+ * on Windows kernel32 sits at the same base in every process, so the address
+ * taken in the injector is valid in the target. Here every pseudo-process maps
+ * its OWN kernel32/kernelbase at a different VA in the one shared address
+ * space, so the remote thread ran the INJECTOR's kernel32 -> kernelbase ->
+ * ntdll copy inside the target: the module it loaded was registered in the
+ * injector's xtajit64 code tracker, while the target's FEX looked it up in its
+ * own one -> NOEXEC at the DllMain entry -> c0000005.
+ *
+ * Fix: when the start address is inside no module of THIS (target) process
+ * but inside a PE image that has a twin here (same export name, SizeOfImage
+ * and TimeDateStamp), move it to the same RVA of the twin. Only runs for
+ * remotely created threads; a start address inside one of our own modules
+ * (ntdll's DbgUiRemoteBreakin etc.) is left alone. All reads fault-safe.
+ * Off switch: MADEIRA_REMOTE_THREAD_REBASE=0. */
+static int ios_rtr_read( uint64_t addr, void *out, size_t len )
+{
+    mach_vm_size_t got = 0;
+    return addr && mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)addr, len,
+                                           (mach_vm_address_t)(uintptr_t)out, &got ) == KERN_SUCCESS && got == len;
+}
+
+/* PE32+ identity of the image at base: export-directory name, SizeOfImage, TimeDateStamp. */
+static int ios_rtr_image_id( uint64_t base, char *name, size_t name_len, uint32_t *size_out, uint32_t *stamp_out )
+{
+    uint32_t lfanew = 0, sig = 0, stamp = 0, img_size = 0, exp_rva = 0, name_rva = 0;
+    uint16_t mz = 0, magic = 0;
+    uint64_t nt, opt;
+    size_t k;
+
+    if (!ios_rtr_read( base, &mz, 2 ) || mz != 0x5a4d) return 0;
+    if (!ios_rtr_read( base + 0x3c, &lfanew, 4 ) || !lfanew || lfanew > 0x1000) return 0;
+    nt = base + lfanew;
+    if (!ios_rtr_read( nt, &sig, 4 ) || sig != 0x4550) return 0;
+    if (!ios_rtr_read( nt + 8, &stamp, 4 )) return 0;            /* FileHeader.TimeDateStamp */
+    opt = nt + 24;
+    if (!ios_rtr_read( opt, &magic, 2 ) || magic != 0x20b) return 0;
+    if (!ios_rtr_read( opt + 56, &img_size, 4 ) || !img_size) return 0;
+    if (!ios_rtr_read( opt + 112, &exp_rva, 4 ) || !exp_rva || exp_rva >= img_size) return 0;
+    if (!ios_rtr_read( base + exp_rva + 12, &name_rva, 4 ) || !name_rva || name_rva >= img_size) return 0;
+    for (k = 0; k + 1 < name_len; k++)
+    {
+        char c = 0;
+        if (!ios_rtr_read( base + name_rva + k, &c, 1 )) return 0;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        name[k] = c;
+        if (!c) break;
+    }
+    name[name_len - 1] = 0;
+    if (!name[0]) return 0;
+    *size_out = img_size;
+    *stamp_out = stamp;
+    return 1;
+}
+
+static void *ios_rebase_remote_thread_start( void *func )
+{
+    extern unsigned long long ios_jit_module_base_for_va( unsigned long long va, unsigned long long *size_out );
+    enum { RTR_MAX_MODS = 384 };
+    uint64_t f = (uint64_t)(uintptr_t)func, peb, ldr = 0, head, cur = 0;
+    uint64_t bases[RTR_MAX_MODS];
+    unsigned long long src_base, src_span = 0;
+    uint32_t src_size = 0, src_stamp = 0;
+    char src_name[64];
+    const char *env = getenv( "MADEIRA_REMOTE_THREAD_REBASE" );
+    int n = 0, i;
+
+    if (!f || (env && env[0] == '0')) return func;
+    if (!(peb = (uint64_t)(uintptr_t)ios_jit_current_peb())) return func;
+    if (!ios_rtr_read( peb + 0x18, &ldr, 8 ) || !ldr) return func;          /* PEB->LdrData */
+    head = ldr + 0x10;                                                     /* InLoadOrderModuleList */
+    if (!ios_rtr_read( head, &cur, 8 )) return func;
+    while (cur && cur != head && n < RTR_MAX_MODS)
+    {
+        uint64_t dllbase = 0, next = 0;
+        uint32_t imgsize = 0;
+        /* LDR_DATA_TABLE_ENTRY (x64): DllBase +0x30, SizeOfImage +0x40 */
+        if (!ios_rtr_read( cur + 0x30, &dllbase, 8 ) || !ios_rtr_read( cur + 0x40, &imgsize, 4 )) break;
+        if (dllbase && f >= dllbase && f < dllbase + imgsize) return func;  /* our own module */
+        if (dllbase) bases[n++] = dllbase;
+        if (!ios_rtr_read( cur, &next, 8 )) break;
+        cur = next;
+    }
+
+    if (!(src_base = ios_jit_module_base_for_va( f, &src_span ))) return func;
+    if (!ios_rtr_image_id( src_base, src_name, sizeof(src_name), &src_size, &src_stamp )) return func;
+    if (f - src_base >= src_size) return func;
+
+    for (i = 0; i < n; i++)
+    {
+        char name[64];
+        uint32_t size = 0, stamp = 0;
+        if (bases[i] == src_base) continue;
+        if (!ios_rtr_image_id( bases[i], name, sizeof(name), &size, &stamp )) continue;
+        if (size != src_size || stamp != src_stamp || strcmp( name, src_name )) continue;
+        dprintf( 2, "[rthread-rebase] start=%p = %s+0x%llx of foreign image %p -> %p (this process's %s at %p) peb=%p\n",
+                 func, src_name, (unsigned long long)(f - src_base), (void *)(uintptr_t)src_base,
+                 (void *)(uintptr_t)(bases[i] + (f - src_base)), src_name, (void *)(uintptr_t)bases[i],
+                 (void *)(uintptr_t)peb );
+        return (void *)(uintptr_t)(bases[i] + (f - src_base));
+    }
+    dprintf( 2, "[rthread-rebase] start=%p = %s+0x%llx of foreign image %p: no twin among %d modules here, unchanged peb=%p\n",
+             func, src_name, (unsigned long long)(f - src_base), (void *)(uintptr_t)src_base, n,
+             (void *)(uintptr_t)peb );
+    return func;
+}
+
+
 /***********************************************************************
  *              invoke_system_apc
  */
@@ -3326,6 +3437,7 @@ static void invoke_system_apc( const union apc_call *call, union apc_result *res
         {
             /* FIXME: hack for debugging 32-bit process without a 64-bit ntdll */
             if (is_old_wow64() && func == (void *)0x7ffe1000) func = pDbgUiRemoteBreakin;
+            if (!self) func = ios_rebase_remote_thread_start( func );
             attr->TotalLength = sizeof(buffer);
             attr->Attributes[0].Attribute    = PS_ATTRIBUTE_CLIENT_ID;
             attr->Attributes[0].Size         = sizeof(id);
