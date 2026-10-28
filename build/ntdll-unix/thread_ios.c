@@ -1757,8 +1757,20 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
      * desktop need it, aarch64 threads must not get it. */
     extern const SECTION_IMAGE_INFORMATION *ios_image_info_for_peb( void *peb_id );
     const SECTION_IMAGE_INFORMATION *ios_ii = ios_image_info_for_peb( teb->Peb );
+    /* madeira: a pure-ARM64 child (cmd.exe, machine 0xaa64) of an x64 session
+     * still runs the session's ARM64EC ntdll, whose loader_init always loads
+     * xtajit64 and calls its ProcessInit -- which dereferences the cpu_area
+     * (TEB->ChpeV2CpuAreaInfo) unconditionally. Without one every such child
+     * died at addr=0x38 inside libarm64ecfex, and the exception redelivery
+     * storm took the whole app down (DS3 Seamless Co-op launcher's
+     * "cmd /c PAUSE"). Give those threads the cpu_area an x64 process gets.
+     * aarch64 sessions (is_arm64ec() == 0, the desktop) are unchanged.
+     * Off switch: MADEIRA_ARM64_CHILD_CPU_AREA=0. */
+    const char *ios_a64_env = getenv( "MADEIRA_ARM64_CHILD_CPU_AREA" );
+    const BOOL ios_a64_child_in_ec = is_arm64ec() && ios_ii->Machine == IMAGE_FILE_MACHINE_ARM64 &&
+                                     !(ios_a64_env && ios_a64_env[0] == '0');
     if (current_machine == IMAGE_FILE_MACHINE_ARM64 &&
-        ios_ii->Machine == IMAGE_FILE_MACHINE_AMD64)
+        (ios_ii->Machine == IMAGE_FILE_MACHINE_AMD64 || ios_a64_child_in_ec))
     {
         CHPE_V2_CPU_AREA_INFO *cpu_area;
         const SIZE_T chpev2_stack_size = 0x40000;
@@ -1773,8 +1785,8 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
         cpu_area->EmulatorStackBase  = (ULONG_PTR)stack.StackBase;
         cpu_area->EmulatorStackLimit = (ULONG_PTR)stack.StackLimit + page_size;
         teb->ChpeV2CpuAreaInfo = cpu_area;
-        ERR("iOS arm64ec: TEB %p ChpeV2CpuAreaInfo=%p (stackBase=%p stackLimit=%p ContextAmd64=%p)\n",
-            teb, cpu_area, (void*)cpu_area->EmulatorStackBase, (void*)cpu_area->EmulatorStackLimit,
+        ERR("iOS arm64ec: TEB %p ChpeV2CpuAreaInfo=%p%s (stackBase=%p stackLimit=%p ContextAmd64=%p)\n",
+            teb, cpu_area, ios_a64_child_in_ec ? " [arm64-child-in-ec]" : "", (void*)cpu_area->EmulatorStackBase, (void*)cpu_area->EmulatorStackLimit,
             cpu_area->ContextAmd64);
     }
     else
