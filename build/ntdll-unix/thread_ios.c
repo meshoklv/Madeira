@@ -3024,6 +3024,26 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
 
     TRACE("(%p,%d,%p,%x,%p)\n", handle, class, data, length, ret_len);
 
+#ifdef WINE_IOS
+    /* ds3-coop [child-suspend]: private class 0x4d50 ('MP', MADEIRA_THREAD_PARK_START
+     * in the ARM64EC ntdll) returns and clears ios_park_start_pending of the
+     * CALLING thread: 1 = its process was created with CREATE_SUSPENDED and
+     * MADEIRA_HONOR_SUSPENDED=1 is set (server_init_process_done), so the PE
+     * loader parks it before its entry point.  Unknown to every other build,
+     * which answers STATUS_INVALID_INFO_CLASS and nothing parks. */
+    if ((ULONG)class == 0x4d50)
+    {
+        extern _Thread_local int ios_park_start_pending;
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!data) return STATUS_ACCESS_VIOLATION;
+        if (handle != GetCurrentThread()) return STATUS_INVALID_HANDLE;
+        *(ULONG *)data = ios_park_start_pending;
+        ios_park_start_pending = 0;
+        if (ret_len) *ret_len = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+#endif
+
     switch (class)
     {
     case ThreadBasicInformation:

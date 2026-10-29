@@ -5616,6 +5616,33 @@ size_t server_init_process_child( int child_fd_socket )
 #endif
 
 
+#ifdef WINE_IOS
+/* ds3-coop [child-suspend]: honor CREATE_SUSPENDED for a pseudo-process child.
+ *
+ * Every child's first thread is created suspended (kernelbase does that and
+ * resumes it itself unless its caller asked for CREATE_SUSPENDED), but
+ * server_init_process_done below always runs it at once.  DS3 Seamless Co-op
+ * (ds3sc_launcher.exe: CreateProcess(SUSPENDED) -> CreateRemoteThread(
+ * LoadLibraryA, ds3sc.dll) -> ResumeThread) needs the game's main thread to
+ * still sit at its start: ds3sc's DllMain GetThreadContext()s it, requires
+ * Rip == GetProcAddress(ntdll, "RtlUserThreadStart"), moves Rcx (the entry
+ * RtlUserThreadStart will call) to its own init and SetThreadContext()s it;
+ * otherwise it silently does nothing.
+ *
+ * With env MADEIRA_HONOR_SUSPENDED=1 and a caller that passed CREATE_SUSPENDED,
+ * this flag is set on the child's main thread.  The PE side (ARM64EC ntdll,
+ * LdrInitializeThunk) reads and clears it through the private thread info
+ * class MADEIRA_THREAD_PARK_START (thread_ios.c) and parks the thread after
+ * loader_init, right before NtContinue to RtlUserThreadStart, where it also
+ * answers Get/SetThreadContext for it with that start context.  Parked after
+ * the loader, not before it: a remote thread created while the process is not
+ * initialized runs loader_init itself, and its start address can only be
+ * rebased into this process's kernel32 (ios_rebase_remote_thread_start) once
+ * the loader list exists. */
+_Thread_local int ios_park_start_pending;
+#endif
+
+
 /***********************************************************************
  *           server_init_process_done
  */
@@ -5676,7 +5703,15 @@ void server_init_process_done(void)
      * Force suspend=0 so the child proceeds immediately. */
     if (suspend)
     {
-        dprintf(STDERR_FILENO, "[Wine init_done] overriding suspend=%d → 0 for iOS\n", suspend);
+        extern _Thread_local int ios_child_create_suspended;
+        const char *honor = getenv( "MADEIRA_HONOR_SUSPENDED" );
+
+        /* the caller asked for CREATE_SUSPENDED: the PE loader parks the
+         * thread after loader_init (see ios_park_start_pending) */
+        if (ios_child_create_suspended && honor && honor[0] == '1') ios_park_start_pending = 1;
+        dprintf(STDERR_FILENO, "[Wine init_done] overriding suspend=%d → 0 for iOS%s\n", suspend,
+                ios_park_start_pending ? "; [child-suspend] CREATE_SUSPENDED honored: main thread will park "
+                                         "after loader init until NtResumeThread" : "");
         suspend = 0;
     }
     {
